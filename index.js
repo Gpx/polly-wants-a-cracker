@@ -50,6 +50,7 @@ function logEntry(req, response, data) {
     new HAR.Entry({
       startedDateTime: new Date(),
       request: new HAR.Request({
+        method: req.method,
         url: req.path,
         headers: getReqHeaders(req.headers),
       }),
@@ -64,14 +65,21 @@ function logEntry(req, response, data) {
 }
 
 function makeRequest(req) {
+  const isMock = req.path.includes('be-mock')
+  const domain = isMock
+    ? 'http://sandbox-backend.travelperk.com'
+    : 'https://tda-sandbox-mock.travelperk.com'
+  const headers = isMock
+    ? req.headers
+    : { ...req.headers, host: 'tda-sandbox-mock.travelperk.com' }
   const options = {
     method: req.method,
-    headers: req.headers,
+    headers,
     redirect: 'follow',
   }
   if (!['HEAD', 'GET'].includes(req.method))
     options.body = JSON.stringify(req.body)
-  const url = `http://sandbox-backend.travelperk.com${req.path}`
+  const url = `${domain}${req.path}`
   return fetch(url, options)
 }
 
@@ -83,12 +91,28 @@ function forwardResponse(res, response, data) {
     .send(data)
 }
 
+function getMatchingResponse(req) {
+  const responseIndex = session.entries.findIndex(
+    entry =>
+      entry.request.method === req.method && entry.request.url === req.path
+  )
+  const { response } = session.entries[responseIndex]
+  session.entries.splice(responseIndex, 1)
+  return response
+}
+
+function getHeadersFromHARHeaders(headers) {
+  return headers.reduce((headers, { name, value }) => {
+    headers[name] = value
+    return headers
+  }, {})
+}
+
 function forwardRecoredResponse(req, res) {
-  const { response } = session.entries[counter]
-  counter++
+  const response = getMatchingResponse(req)
   res
     .status(response.status)
-    .set(getResponseHeaders(response.headers))
+    .set(getHeadersFromHARHeaders(response.headers))
     .set('content-encoding', 'identity')
     .send(response.content.text)
 }
@@ -109,8 +133,10 @@ app.all('*', upload.array(), async (req, res) => {
   try {
     debug(`received request for ${req.method} ${req.path}`)
     if (program.mode === 'replay') {
+      debug('Sengind recored request')
       forwardRecoredResponse(req, res)
     } else {
+      debug('Forwarding and recording request')
       const response = await makeRequest(req)
       const data = await response.text()
       logEntry(req, response, data)
